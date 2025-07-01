@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
 dir_tree_html.py  – Generate a pretty, chronologically-sorted HTML “tree view”
-                    (newest‐modified items first) of any directory.
+                    (newest‐modified items first) of any directory,
+                    with optional file/folder filters.
 
 Usage
 -----
     python dir_tree_html.py <base_dir> [-o output.html]
+        [--filter-file FILE [FILE ...]]
+        [--filter-folder FOLDER [FOLDER ...]]
 
 • For **files**: shows creation date, modified date, and size.
 • For **folders**: shows creation date, modified date, and *cumulative* size
   of everything inside the folder, plus a collapsible sub-tree.
+• **filter-file**: list of filenames to skip (default: tmp.py, tmp.c)
+• **filter-folder**: list of folder names to skip (default: __pycache__)
 
 The output is a self-contained HTML file with embedded CSS (dark-mode aware)
 and zero external dependencies.
@@ -26,27 +31,26 @@ from pathlib import Path
 # ──────────────────────────────────────────────────────────────────────────────
 # Utility helpers
 # ──────────────────────────────────────────────────────────────────────────────
-DT_FMT = "%Y-%m-%d %H:%M:%S"  # FIXED: proper day-of-month directive
+DT_FMT = "%Y-%m-%d %H:%M:%S"
 
 def ts_to_str(ts: float) -> str:
-    """Format a Unix timestamp for HTML output (local time)."""
     return datetime.fromtimestamp(ts).strftime(DT_FMT)
 
 def human_size(num_bytes: int) -> str:
-    """Return bytes in human-readable form (KiB, MiB, …)."""
     if num_bytes == 1:
         return "1 byte"
     for unit in ("bytes", "KiB", "MiB", "GiB", "TiB"):
         if num_bytes < 1024.0 or unit == "TiB":
             return f"{num_bytes:.1f} {unit}" if unit != "bytes" else f"{num_bytes} {unit}"
         num_bytes /= 1024.0
-    return f"{num_bytes:.1f} PiB"  # fallback
+    return f"{num_bytes:.1f} PiB"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tree model
 # ──────────────────────────────────────────────────────────────────────────────
 class Node:
-    __slots__ = ("path","name","is_dir","size","ctime","mtime","children")
+    __slots__ = ("path","name","is_dir","size","ctime","mtime","children",
+                 "filter_file","filter_folder")
 
     def __init__(
         self,
@@ -56,6 +60,8 @@ class Node:
         ctime: float,
         mtime: float,
         children: list["Node"] | None = None,
+        filter_file: set[str] = set(),
+        filter_folder: set[str] = set(),
     ):
         self.path = path
         self.name = path.name or str(path)
@@ -64,23 +70,36 @@ class Node:
         self.ctime = ctime
         self.mtime = mtime
         self.children = children or []
+        self.filter_file = filter_file
+        self.filter_folder = filter_folder
 
     @classmethod
-    def build(cls, path: Path) -> "Node":
-        """Recursively construct a Node tree rooted at *path*."""
+    def build(
+        cls,
+        path: Path,
+        filter_file: set[str],
+        filter_folder: set[str],
+    ) -> "Node":
         try:
             st = path.stat()
         except OSError as e:
-            print(f"⚠️  Skipping {path!s} – {e}", file=sys.stderr)
-            # make a ghost node
-            return cls(path, False, 0, 0, 0)
+            print(f"⚠️  Skipping {path} – {e}", file=sys.stderr)
+            return cls(path, False, 0, 0, 0, None, filter_file, filter_folder)
+
+        name = path.name
+        # apply filters
+        if path.is_dir() and name in filter_folder:
+            print(f"🔕  Skipping folder {path}", file=sys.stderr)
+            return cls(path, True, 0, st.st_ctime, st.st_mtime, [], filter_file, filter_folder)
+        if not path.is_dir() and name in filter_file:
+            print(f"🔕  Skipping file {path}", file=sys.stderr)
+            return cls(path, False, 0, st.st_ctime, st.st_mtime, None, filter_file, filter_folder)
 
         if path.is_dir():
-            # list entries and stat them
             try:
                 raw_entries = list(path.iterdir())
             except OSError as e:
-                print(f"⚠️  Cannot list {path!s} – {e}", file=sys.stderr)
+                print(f"⚠️  Cannot list {path} – {e}", file=sys.stderr)
                 raw_entries = []
 
             stat_map: dict[Path, os.stat_result] = {}
@@ -88,22 +107,25 @@ class Node:
                 try:
                     stat_map[child] = child.stat()
                 except OSError as e:
-                    print(f"⚠️  Skipping {child!s} – {e}", file=sys.stderr)
+                    print(f"⚠️  Skipping {child} – {e}", file=sys.stderr)
 
-            # drop any entries we couldn't stat
             entries = [p for p in raw_entries if p in stat_map]
-            # sort by descending mtime
             entries.sort(key=lambda p: stat_map[p].st_mtime, reverse=True)
 
-            children: list[Node] = [cls.build(child) for child in entries]
-            dir_size = sum(ch.size for ch in children)
-            return cls(path, True, dir_size, st.st_ctime, st.st_mtime, children)
+            children: list[Node] = []
+            total = 0
+            for child in entries:
+                node = cls.build(child, filter_file, filter_folder)
+                # only count size if not filtered
+                total += node.size
+                children.append(node)
+
+            return cls(path, True, total, st.st_ctime, st.st_mtime, children, filter_file, filter_folder)
         else:
-            return cls(path, False, st.st_size, st.st_ctime, st.st_mtime)
+            return cls(path, False, st.st_size, st.st_ctime, st.st_mtime, None, filter_file, filter_folder)
 
     def to_html(self, indent: int = 0) -> str:
-        """Return HTML representation for this node (recursive)."""
-        esc_name = html.escape(self.name, quote=False)
+        esc = html.escape(self.name, quote=False)
         created = ts_to_str(self.ctime)
         modified = ts_to_str(self.mtime)
         size_h = human_size(self.size)
@@ -112,7 +134,7 @@ class Node:
         if self.is_dir:
             header = (
                 f"{pad}<details open>\n"
-                f"{pad}  <summary>📁 <strong>{esc_name}/</strong>"
+                f"{pad}  <summary>📁 <strong>{esc}/</strong>"
                 f" ({size_h}, modified {modified})</summary>\n"
                 f"{pad}  <ul>\n"
             )
@@ -121,12 +143,12 @@ class Node:
             return header + body + footer
         else:
             return (
-                f"{pad}<li>📄 {esc_name} "
+                f"{pad}<li>📄 {esc} "
                 f"<small>({size_h}, modified {modified})</small></li>\n"
             )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# HTML document wrapper
+# HTML wrapper (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
 DOC_TEMPLATE = """\
 <!doctype html>
@@ -201,11 +223,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("base_dir", type=Path, help="Directory to scan")
     parser.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        default=Path("dir_tree.html"),
+        "-o", "--output", type=Path, default=Path("dir_tree.html"),
         help="Destination HTML file",
+    )
+    parser.add_argument(
+        "--filter-file", nargs="*", default=[],
+        help="List of filenames to skip"
+    )
+    parser.add_argument(
+        "--filter-folder", nargs="*", default=["__pycache__", "wandb"],
+        help="List of folder names to skip"
     )
     return parser.parse_args()
 
@@ -215,8 +242,12 @@ def main() -> None:
     if not base_dir.exists():
         sys.exit(f"❌  Path does not exist: {base_dir}")
 
+    # convert lists to sets for faster lookup
+    ff = set(args.filter_file)
+    fd = set(args.filter_folder)
+
     print(f"📂 Building tree for {base_dir} …")
-    root_node = Node.build(base_dir)
+    root_node = Node.build(base_dir, ff, fd)
 
     print("🖋️  Rendering HTML …")
     html_tree = root_node.to_html(indent=0)
