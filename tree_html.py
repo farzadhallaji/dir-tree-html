@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 dir_tree_html.py  – Generate a pretty, chronologically-sorted HTML “tree view”
-                    (newest-modified items first) of any directory.
+                    (newest‐modified items first) of any directory.
 
 Usage
 -----
     python dir_tree_html.py <base_dir> [-o output.html]
 
-• For **files**: shows created date, modified date, and size.
-• For **folders**: shows created date, modified date, and *cumulative* size
+• For **files**: shows creation date, modified date, and size.
+• For **folders**: shows creation date, modified date, and *cumulative* size
   of everything inside the folder, plus a collapsible sub-tree.
 
 The output is a self-contained HTML file with embedded CSS (dark-mode aware)
@@ -16,7 +16,6 @@ and zero external dependencies.
 """
 
 from __future__ import annotations
-
 import argparse
 import html
 import os
@@ -27,13 +26,11 @@ from pathlib import Path
 # ──────────────────────────────────────────────────────────────────────────────
 # Utility helpers
 # ──────────────────────────────────────────────────────────────────────────────
-DT_FMT = "%Y-%m-d %H:%M:%S"  # narrow NBSP before time for nicer wrapping
-
+DT_FMT = "%Y-%m-%d %H:%M:%S"  # FIXED: proper day-of-month directive
 
 def ts_to_str(ts: float) -> str:
     """Format a Unix timestamp for HTML output (local time)."""
     return datetime.fromtimestamp(ts).strftime(DT_FMT)
-
 
 def human_size(num_bytes: int) -> str:
     """Return bytes in human-readable form (KiB, MiB, …)."""
@@ -43,22 +40,13 @@ def human_size(num_bytes: int) -> str:
         if num_bytes < 1024.0 or unit == "TiB":
             return f"{num_bytes:.1f} {unit}" if unit != "bytes" else f"{num_bytes} {unit}"
         num_bytes /= 1024.0
-    return f"{num_bytes:.1f} PiB"  # never reached in practice
-
+    return f"{num_bytes:.1f} PiB"  # fallback
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tree model
 # ──────────────────────────────────────────────────────────────────────────────
 class Node:
-    __slots__ = (
-        "path",
-        "name",
-        "is_dir",
-        "size",
-        "ctime",
-        "mtime",
-        "children",
-    )
+    __slots__ = ("path","name","is_dir","size","ctime","mtime","children")
 
     def __init__(
         self,
@@ -75,57 +63,53 @@ class Node:
         self.size = size
         self.ctime = ctime
         self.mtime = mtime
-        self.children = children or []  # valid only if is_dir
+        self.children = children or []
 
     @classmethod
     def build(cls, path: Path) -> "Node":
         """Recursively construct a Node tree rooted at *path*."""
         try:
-            stat = path.stat()
+            st = path.stat()
         except OSError as e:
             print(f"⚠️  Skipping {path!s} – {e}", file=sys.stderr)
-            # fabricate a “ghost” node so the tree still renders
+            # make a ghost node
             return cls(path, False, 0, 0, 0)
 
         if path.is_dir():
-            # Gather children first (sorted by *descending* mtime)
-            children: list[Node] = []
+            # list entries and stat them
             try:
-                entries = list(path.iterdir())
+                raw_entries = list(path.iterdir())
             except OSError as e:
                 print(f"⚠️  Cannot list {path!s} – {e}", file=sys.stderr)
-                entries = []
+                raw_entries = []
 
-            # Pre-stat each entry so we can sort by mtime
             stat_map: dict[Path, os.stat_result] = {}
-            for child in entries:
+            for child in raw_entries:
                 try:
                     stat_map[child] = child.stat()
                 except OSError as e:
                     print(f"⚠️  Skipping {child!s} – {e}", file=sys.stderr)
+
+            # drop any entries we couldn't stat
+            entries = [p for p in raw_entries if p in stat_map]
+            # sort by descending mtime
             entries.sort(key=lambda p: stat_map[p].st_mtime, reverse=True)
 
-            for child in entries:
-                child_node = cls.build(child)
-                children.append(child_node)
-
-            # Cumulative size (sum of all descendant file sizes)
+            children: list[Node] = [cls.build(child) for child in entries]
             dir_size = sum(ch.size for ch in children)
-            return cls(path, True, dir_size, stat.st_ctime, stat.st_mtime, children)
+            return cls(path, True, dir_size, st.st_ctime, st.st_mtime, children)
         else:
-            return cls(path, False, stat.st_size, stat.st_ctime, stat.st_mtime)
+            return cls(path, False, st.st_size, st.st_ctime, st.st_mtime)
 
-    # ── HTML generation helpers ────────────────────────────────────────
     def to_html(self, indent: int = 0) -> str:
         """Return HTML representation for this node (recursive)."""
         esc_name = html.escape(self.name, quote=False)
         created = ts_to_str(self.ctime)
         modified = ts_to_str(self.mtime)
         size_h = human_size(self.size)
-
         pad = "  " * indent
+
         if self.is_dir:
-            # <details>/<summary> provides a native collapsible tree
             header = (
                 f"{pad}<details open>\n"
                 f"{pad}  <summary>📁 <strong>{esc_name}/</strong>"
@@ -140,7 +124,6 @@ class Node:
                 f"{pad}<li>📄 {esc_name} "
                 f"<small>({size_h}, modified {modified})</small></li>\n"
             )
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # HTML document wrapper
@@ -172,7 +155,7 @@ details > summary {{
   cursor: pointer;
   margin: 0.4em 0;
 }}
-summary::-webkit-details-marker {{ display: none; }} /* hide default marker */
+summary::-webkit-details-marker {{ display: none; }}
 details summary::before {{
   content: "▸ ";
   display: inline-block;
@@ -199,8 +182,7 @@ Generated {now} (local time). Entries sorted by <em>most recently modified</em>.
 </main>
 </body>
 </html>
-""".replace("\n", "\n")  # keep template readable with triple quoted string
-
+"""
 
 def build_html_document(root_path: Path, tree_html: str) -> str:
     return DOC_TEMPLATE.format(
@@ -208,7 +190,6 @@ def build_html_document(root_path: Path, tree_html: str) -> str:
         now=datetime.now().strftime(DT_FMT),
         tree_html=tree_html,
     )
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI
@@ -228,11 +209,9 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
-
 def main() -> None:
     args = parse_args()
-    base_dir: Path = args.base_dir.expanduser().resolve()
-
+    base_dir = args.base_dir.expanduser().resolve()
     if not base_dir.exists():
         sys.exit(f"❌  Path does not exist: {base_dir}")
 
@@ -245,7 +224,6 @@ def main() -> None:
 
     args.output.write_text(html_doc, encoding="utf-8")
     print(f"✅  Done!  Open {args.output} in a browser.")
-
 
 if __name__ == "__main__":
     main()
