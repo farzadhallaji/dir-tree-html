@@ -231,7 +231,7 @@ def parse_args() -> argparse.Namespace:
         help="List of filenames to skip"
     )
     parser.add_argument(
-        "--filter-folder", nargs="*", default=["__pycache__", "wandb"],
+        "--filter-folder", nargs="*", default=["__pycache__", "wandb", '.vscode-server', '.git'],
         help="List of folder names to skip"
     )
     return parser.parse_args()
